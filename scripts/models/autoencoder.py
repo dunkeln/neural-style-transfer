@@ -1,12 +1,11 @@
 import torch
 import torch.nn as nn
-import torchvision.models as models
 from collections import OrderedDict
 from itertools import chain
 import logging
 
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,
     format="%(levelname)s - shape: %(message)s",
     handlers=[logging.StreamHandler()])
 
@@ -23,7 +22,7 @@ class Encoder(nn.Module):
 
     def forward(self, img):
         encoded = self.encoder(img)
-        logging.info(tuple(encoded.size()))
+        logging.debug(tuple(encoded.size()))
         return encoded
 
 
@@ -42,7 +41,7 @@ class Decoder(nn.Module):
 
     def forward(self, encoded):
         decoded = self.decoder(encoded)
-        logging.info(tuple(decoded.size()))
+        logging.debug(tuple(decoded.size()))
         return decoded
 
     @staticmethod
@@ -58,7 +57,7 @@ class Decoder(nn.Module):
                 ]
 
 
-class StyleTransfer(nn.Module):
+class AutoEncoder(nn.Module):
     def __init__(self, base_model: nn.Sequential):
         """
             Universal Style Transfer Model for VGG-19 net
@@ -71,27 +70,27 @@ class StyleTransfer(nn.Module):
             Params:
                 base_model(torch.nn.Sequential): Convolutional layer of VGG19
         """
-        super(StyleTransfer, self).__init__()
+        super(AutoEncoder, self).__init__()
 
-        # INFO: all encoders chunked down
-        self.autoencoder = OrderedDict()
+        # debug: all encoders chunked down
+        self.encoder = OrderedDict()
         encoder = []
         ref = 0
         for layer in list(base_model.children()):
             if isinstance(layer, nn.MaxPool2d):
-                self.autoencoder.update({
+                self.encoder.update({
                     f'layer_{(ref := ref+1)}': Encoder(encoder)
                 })
                 encoder = []
             encoder.append(layer)
 
-        self.autoencoder = nn.Sequential(self.autoencoder)
+        self.encoder = nn.Sequential(self.encoder)
 
         self.decoder = OrderedDict()
         # mirror encoder
-        for i in reversed(range(len(self.autoencoder))):
+        for i in reversed(range(len(self.encoder))):
             layer = f"layer_{i+1}"
-            encoder = self.autoencoder.get_submodule(layer).encoder
+            encoder = self.encoder.get_submodule(layer).encoder
             self.decoder.update({
                 layer: Decoder(encoder, constant_dim=(i + 1 == 5))
                 })
@@ -99,17 +98,6 @@ class StyleTransfer(nn.Module):
         self.decoder = nn.Sequential(self.decoder)
 
     def forward(self, img):
-        encoded = self.autoencoder(img)
+        encoded = self.encoder(img)
         decoded = self.decoder(encoded)
         return decoded
-
-
-if __name__ == '__main__':
-    model = StyleTransfer(
-                models
-                .vgg19(weights=models.VGG19_Weights.IMAGENET1K_V1)
-                .features
-            )
-    img = torch.randn(1, 3, 224, 224)
-    decoded = model(img)
-    print(decoded.shape)
