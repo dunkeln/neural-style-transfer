@@ -1,15 +1,14 @@
 import torch
 import torch.nn as nn
-import torchvision.models as models
 from collections import OrderedDict
 from itertools import chain
 import logging
+from .lib import compose
 
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,
     format="%(levelname)s - shape: %(message)s",
     handlers=[logging.StreamHandler()])
-
 
 class Encoder(nn.Module):
     def __init__(self, layers):
@@ -23,42 +22,56 @@ class Encoder(nn.Module):
 
     def forward(self, img):
         encoded = self.encoder(img)
-        logging.info(tuple(encoded.size()))
+        logging.debug(tuple(encoded.size()))
         return encoded
 
 
 class Decoder(nn.Module):
     def __init__(self, encoder: Encoder, constant_dim=False):
         super(Decoder, self).__init__()
-        isConv = lambda x: isinstance(x, nn.Conv2d)
-        encoder = list(reversed(list(filter(isConv, list(encoder.children())))))
-
-        self.decoder = map(
-                lambda layer:
-                Decoder.transpose_conv(layer[1], preserve_dim=constant_dim | (layer[0] != len(encoder)-1)),
-                enumerate(encoder))
-        self.decoder = list(chain.from_iterable(self.decoder))
-        self.decoder = nn.Sequential(*self.decoder)
+        encoder = encoder.children()
+        self.decoder = Decoder.filterEncoder()(encoder)
+        self.decoder = Decoder.transformEncoder(len(self.decoder), constant_dim)(self.decoder)
 
     def forward(self, encoded):
         decoded = self.decoder(encoded)
-        logging.info(tuple(decoded.size()))
+        logging.debug(tuple(decoded.size()))
         return decoded
+    
+    @staticmethod
+    def filterEncoder():
+        isConv = lambda x: isinstance(x, nn.Conv2d)
+        convFilter = lambda x: filter(isConv, x)
+        inspectEncoder = compose(list, reversed, list, convFilter, list)
+        return inspectEncoder
+
+    @staticmethod
+    def transformEncoder(encoding_len: int, constant_dim=False):
+        remapToTransposeConv = lambda x: map(
+            lambda layer:
+            Decoder.transpose_conv(layer[1], preserve_dim=constant_dim | (layer[0] != encoding_len-1)),
+            enumerate(x))
+        makeSequential = lambda x: nn.Sequential(*x)
+        buildDecoder = compose(
+            remapToTransposeConv,
+            chain.from_iterable,
+            list,
+            makeSequential)
+        return buildDecoder
+
 
     @staticmethod
     def transpose_conv(conv: nn.Conv2d, preserve_dim=True):
-        return [
-                nn.ConvTranspose2d(
+        return [ nn.ConvTranspose2d(
                     in_channels=conv.out_channels,
                     out_channels=conv.in_channels,
                     kernel_size=3 if preserve_dim else 4,
                     padding=1,
                     stride=1 if preserve_dim else 2,
-                ), nn.ReLU()
-                ]
+                ), nn.ReLU() ]
 
 
-class StyleTransfer(nn.Module):
+class AutoEncoder(nn.Module):
     def __init__(self, base_model: nn.Sequential):
         """
             Universal Style Transfer Model for VGG-19 net
@@ -71,27 +84,30 @@ class StyleTransfer(nn.Module):
             Params:
                 base_model(torch.nn.Sequential): Convolutional layer of VGG19
         """
-        super(StyleTransfer, self).__init__()
-
-        # INFO: all encoders chunked down
-        self.autoencoder = OrderedDict()
+        super(AutoEncoder, self).__init__()
+        
+        # building the encoder...
+        self.encoder = OrderedDict()
         encoder = []
-        ref = 0
-        for layer in list(base_model.children()):
+        # definitely safe to put 10, will have 5 encoder layers
+        ref = iter(range(1, 10))
+        for layer in base_model.children():
+            # chunk model into encoding layers right before MaxPool Layer is added
             if isinstance(layer, nn.MaxPool2d):
-                self.autoencoder.update({
-                    f'layer_{(ref := ref+1)}': Encoder(encoder)
+                self.encoder.update({
+                    f'layer_{next(ref)}': Encoder(encoder)
                 })
                 encoder = []
             encoder.append(layer)
 
-        self.autoencoder = nn.Sequential(self.autoencoder)
+        self.encoder = nn.Sequential(self.encoder)
 
+        # building the decoder...
         self.decoder = OrderedDict()
         # mirror encoder
-        for i in reversed(range(len(self.autoencoder))):
+        for i in reversed(range(len(self.encoder))):
             layer = f"layer_{i+1}"
-            encoder = self.autoencoder.get_submodule(layer).encoder
+            encoder = self.encoder.get_submodule(layer).encoder
             self.decoder.update({
                 layer: Decoder(encoder, constant_dim=(i + 1 == 5))
                 })
@@ -99,17 +115,6 @@ class StyleTransfer(nn.Module):
         self.decoder = nn.Sequential(self.decoder)
 
     def forward(self, img):
-        encoded = self.autoencoder(img)
+        encoded = self.encoder(img)
         decoded = self.decoder(encoded)
         return decoded
-
-
-if __name__ == '__main__':
-    model = StyleTransfer(
-                models
-                .vgg19(weights=models.VGG19_Weights.IMAGENET1K_V1)
-                .features
-            )
-    img = torch.randn(1, 3, 224, 224)
-    decoded = model(img)
-    print(decoded.shape)
